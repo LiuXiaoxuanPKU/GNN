@@ -16,7 +16,7 @@ from actnn.utils import get_memory_usage, compute_tensor_bytes
 from utils import AverageMeter
 
 from cogdl.datasets.ogb import OGBArxivDataset
-from models import GCN, SAGE
+from models import GCN, SAGE, GAT
 
 wandb.init(project="ActNN-Graph")
 parser = argparse.ArgumentParser(description="GNN (ActNN)")
@@ -25,13 +25,17 @@ parser.add_argument("--hidden-size", type=int, default=256)
 parser.add_argument("--dropout", type=float, default=0.5)
 parser.add_argument("--lr", type=float, default=0.01)
 parser.add_argument("--epochs", type=int, default=500)
+parser.add_argument("--patience", type=int, default=100)
 parser.add_argument("--model", type=str, default="gcn")
-parser.add_argument("--norm", type=str, default=None)
+parser.add_argument("--level", type=str, default="L2.1")
+parser.add_argument("--nhead", type=int, default=3)
+parser.add_argument("--norm", type=str, default="batchnorm")
 parser.add_argument("--activation", type=str, default="relu")
 parser.add_argument("--actnn", action="store_true")
 parser.add_argument("--get-mem", action="store_true")
 args = parser.parse_args()
 
+wandb.config.update(args)
 
 quantize = args.actnn
 get_mem = args.get_mem
@@ -63,12 +67,23 @@ elif args.model == "sage":
         activation=args.activation,
         norm=args.norm,
     )
+elif args.model == "gat":
+    model = GAT(
+        in_feats=dataset.num_features,
+        out_feats=dataset.num_classes,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        activation=args.activation,
+        norm=args.norm,
+        nhead=args.nhead,
+    )
 else:
     raise NotImplementedError
 print(model)
 model.to(device)
 
-actnn.set_optimization_level("L2.1")
+actnn.set_optimization_level(args.level)
 controller = Controller(model)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -108,6 +123,7 @@ with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
 
     best_model = None
     best_acc = 0
+    patience = 0
     epoch_iter = tqdm(range(args.epochs))
 
     for i in epoch_iter:
@@ -152,7 +168,12 @@ with torch.autograd.graph.saved_tensors_hooks(pack_hook, unpack_hook):
                   "val_loss": val_loss, "val_acc": val_acc})
         if val_acc > best_acc:
             best_acc = val_acc
+            patience = 0
             best_model = copy.deepcopy(model)
+        else:
+            patience += 1
+            if patience >= args.patience:
+                break
 
         if get_mem and i > 0:
             print("===============After Backward=======================")
